@@ -60,11 +60,9 @@ ADZUNA_APP_ID = "votre_app_id_adzuna"
 ADZUNA_APP_KEY = "votre_app_key_adzuna"
 ```
 
-### 3. Valider les sources et scénarios d'offres sans Gemini
+### 3. Valider les sources d'offres sans Gemini
 ```bash
-python test_scenarios.py
 python test_sources.py
-python test_app.py
 ```
 
 ### 4. Lancer l'application web

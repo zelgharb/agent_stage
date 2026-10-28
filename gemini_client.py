@@ -2,7 +2,7 @@
 Module d'intégration avec l'API Gemini.
 Gestion de cascade de modèles, retry 503 (attente 3s puis 6s), bascule 429 (quota).
 Protection stricte de la clé API et intégrité des liens d'offres.
-Aucun exemple biaisé : pays et ville définis exclusivement par l'utilisateur.
+Aucun exemple biaisé (zéro mention de Paris/France par défaut).
 """
 
 import json
@@ -189,7 +189,7 @@ Consignes :
 
 RÈGLES STRICTES DE RECHERCHE :
 - Si une localisation est demandée ('{target_loc}'), tes requêtes avec mention géographique doivent cibler UNIQUEMENT '{target_loc}'.
-- N'inclus JAMAIS d'autre pays ou ville (interdiction formelle d'ajouter une autre localisation que '{target_loc}').
+- N'inclus JAMAIS d'autre pays ou ville (interdiction formelle d'ajouter 'France' ou 'Paris' si la demande est '{target_loc}').
 - Formule aussi des requêtes basées sur les compétences et l'intitulé du poste sans ville (ex: 'Stage Machine Learning', 'Intern Python Developer').
 
 Schéma JSON attendu :
