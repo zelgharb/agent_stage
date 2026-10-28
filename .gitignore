@@ -1,0 +1,21 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Streamlit secrets and runtime data
+.streamlit/secrets.toml
+.streamlit/*.json
+.streamlit/*.pid
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# OS / Editor files
+.DS_Store
+.idea/
+.vscode/
