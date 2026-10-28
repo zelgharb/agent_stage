@@ -5,16 +5,17 @@ Test d'intégration local validant la logique complète de l'application :
 - Validation de la longueur du texte (seuil 100 car.)
 - Récupération des offres réelles et déduplication
 - Vérification que tous les liens sont réels et inchangés
+- Aucune valeur de localisation codée en dur (utilisation de variables paramétrables)
 """
 
 import os
 import pypdf
-from sources import fetch_all_internships
+from sources import fetch_all_internships, normalize_location
 from gemini_client import clean_json_response
 
 def test_pdf_extraction():
     print("[1] Test de lecture et extraction PDF...")
-    pdf_path = "/home/zelgharb/agent_stage/sample_cv.pdf"
+    pdf_path = os.path.join(os.path.dirname(__file__), "sample_cv.pdf")
     assert os.path.exists(pdf_path), "sample_cv.pdf introuvable"
     
     reader = pypdf.PdfReader(pdf_path)
@@ -31,12 +32,17 @@ def test_pdf_extraction():
 
 def test_offers_pipeline():
     print("\n[2] Test du pipeline d'offres réelles...")
-    queries = ["Stage Data Science", "Machine Learning Intern", "Python"]
-    offers, statuses = fetch_all_internships(queries, country="France", city="Paris")
+    test_country = os.environ.get("TEST_COUNTRY", "Télétravail / Remote")
+    test_city = os.environ.get("TEST_CITY", "")
+    queries = ["Stage Informatique", "Python Intern", "Data"]
     
+    offers, statuses = fetch_all_internships(queries, country=test_country, city=test_city)
+    
+    print(f"  Localisation testée : Pays='{test_country}', Ville='{test_city}'")
     print(f"  Offres récupérées : {len(offers)}")
     assert len(offers) > 0, "Le pipeline doit retourner des offres réelles"
     
+    norm = normalize_location(test_country, test_city)
     for o in offers:
         assert "url" in o and o["url"].startswith("http"), f"Offre sans URL valide : {o}"
         assert "title" in o and len(o["title"]) > 0, "Titre manquant"

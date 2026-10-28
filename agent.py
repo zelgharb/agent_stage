@@ -1,7 +1,7 @@
 """
 Application Streamlit : Agent IA de Recherche de Stages (100% Gratuit)
 Hébergé sur Streamlit Community Cloud.
-Respect strict des critères géographiques (aucun affichage de France/Paris si Maroc choisi).
+Respect strict des critères géographiques choisis par l'utilisateur.
 """
 
 import time
@@ -10,7 +10,7 @@ import streamlit as st
 import pypdf
 from typing import List, Dict, Any, Tuple
 
-from sources import fetch_all_internships, check_country_coverage
+from sources import fetch_all_internships, check_country_coverage, normalize_location
 from gemini_client import analyze_cv, evaluate_offers
 
 # Configuration de la page
@@ -76,6 +76,16 @@ st.markdown("""
         border-radius: 9999px;
         font-size: 0.85rem;
     }
+    .unconfirmed-badge {
+        background-color: #FEF08A;
+        color: #854D0E;
+        font-weight: 700;
+        padding: 0.2rem 0.55rem;
+        border-radius: 4px;
+        font-size: 0.78rem;
+        display: inline-block;
+        margin-top: 0.2rem;
+    }
     .stButton>button {
         background-color: #2563EB;
         color: white;
@@ -137,17 +147,45 @@ def cached_fetch_internships(
 # Barre latérale (Paramètres & Confidentialité)
 with st.sidebar:
     st.header("⚙️ Paramètres de recherche")
+
+    COUNTRY_OPTIONS = [
+        "Maroc",
+        "France",
+        "Belgique",
+        "Suisse",
+        "Canada",
+        "Allemagne",
+        "Espagne",
+        "Royaume-Uni",
+        "États-Unis",
+        "Tunisie",
+        "Algérie",
+        "Sénégal",
+        "Côte d'Ivoire",
+        "Télétravail / Remote",
+        "Autre pays"
+    ]
     
-    country_input = st.text_input(
+    country_selected = st.selectbox(
         "🌍 Pays souhaité",
-        value="Maroc",
-        help="Ex: Maroc, France, Allemagne, Suisse, Canada, etc."
+        options=COUNTRY_OPTIONS,
+        index=None,
+        placeholder="Choisis un pays...",
+        help="Sélectionne ton pays ou 'Télétravail / Remote'. Aucune valeur par défaut."
+    )
+    
+    other_country_input = st.text_input(
+        "✍️ Autre pays (saisie libre)",
+        value="",
+        placeholder="Indique le pays si absent de la liste...",
+        help="Utilisé seulement si le pays voulu n'est pas dans la liste déroulante ci-dessus."
     )
     
     city_input = st.text_input(
         "📍 Ville (optionnel)",
-        value="Casablanca",
-        placeholder="Ex: Casablanca, Rabat, Paris, Lyon, Remote..."
+        value="",
+        placeholder="Laisser vide pour chercher dans tout le pays...",
+        help="Si la ville est vide, la recherche porte sur l'ensemble du pays."
     )
     
     domain_input = st.text_input(
@@ -173,8 +211,8 @@ with st.sidebar:
     st.markdown("""
     - **Arbeitnow** : Offres réelles Europe & Télétravail *(Actif sans clé)*
     - **Remotive** : Télétravail 100% mondial *(Actif sans clé)*
-    - **Jooble** : Maroc & 70+ pays *(Requiert `JOOBLE_API_KEY`)*
-    - **Adzuna** : France, UK, USA... *(Requiert clés Adzuna)*
+    - **Jooble** : 70+ pays dont Maroc, France... *(Requiert `JOOBLE_API_KEY`)*
+    - **Adzuna** : France, UK, USA, Canada... *(Requiert clés Adzuna)*
     """)
     
     if st.button("🔄 Vider le cache de recherche"):
@@ -183,6 +221,23 @@ with st.sidebar:
         
     st.markdown("---")
     st.caption("🔒 **Respect de la vie privée** : Chaque visiteur teste avec son propre CV. Aucune donnée n'est enregistrée sur le serveur.")
+
+# Résolution et normalisation du pays et de la ville
+if country_selected == "Autre pays":
+    raw_chosen_country = other_country_input.strip()
+elif country_selected:
+    raw_chosen_country = country_selected.strip()
+elif other_country_input.strip():
+    raw_chosen_country = other_country_input.strip()
+else:
+    raw_chosen_country = ""
+
+norm_geo = normalize_location(raw_chosen_country, city_input)
+norm_country = norm_geo["canonical_name"]
+norm_city = norm_geo["city"]
+loc_display = norm_geo["display_location"]
+is_remote_search = norm_geo["is_remote"]
+is_country_chosen = bool(norm_country)
 
 # Corps principal
 st.markdown('<div class="main-title">🎯 Agent IA de Recherche de Stages</div>', unsafe_allow_html=True)
@@ -213,31 +268,41 @@ if not gemini_key:
 # Zone d'import du CV
 uploaded_file = st.file_uploader("📄 Dépose ton CV au format PDF :", type=["pdf"])
 
-search_button = st.button("🚀 Lancer la recherche de stages")
+# Exigence A.3 : Le bouton est désactivé et affiche un message clair tant qu'aucun pays n'est sélectionné
+if not is_country_chosen:
+    st.warning("⚠️ **Choisis d'abord un pays** dans la barre latérale pour activer la recherche.")
+    search_button = st.button("🚀 Lancer la recherche de stages", disabled=True)
+else:
+    search_button = st.button("🚀 Lancer la recherche de stages", disabled=False)
 
 # Traitement lors du clic
 if search_button:
+    if not is_country_chosen:
+        st.error("Choisis d'abord un pays.")
+        st.stop()
+
     if not uploaded_file:
         st.warning("Veuillez d'abord déposer un fichier CV au format PDF.")
         st.stop()
 
-    # Protection quota gratuit : 1 recherche toutes les 60 secondes par session
-    if "last_search_time" not in st.session_state:
-        st.session_state.last_search_time = 0
+    # Protection quota gratuit : 1 recherche par minute par localisation
+    # Changer le pays ou la ville relance immédiatement une vraie recherche sans être bloqué
+    if "last_searches" not in st.session_state:
+        st.session_state.last_searches = {}
 
+    loc_rate_key = f"{norm_country.lower()}||{norm_city.lower()}"
     current_time = time.time()
-    elapsed = current_time - st.session_state.last_search_time
+    last_time_for_loc = st.session_state.last_searches.get(loc_rate_key, 0)
+    elapsed = current_time - last_time_for_loc
+
     if elapsed < 60:
         remaining = int(60 - elapsed)
-        st.warning(f"⏳ **Protection du quota gratuit** : Merci d'attendre encore **{remaining} seconde(s)** avant de relancer une recherche.")
+        st.warning(f"⏳ **Protection du quota gratuit** : Une recherche pour `{loc_display}` a déjà été lancée. Merci d'attendre encore **{remaining} seconde(s)** avant de relancer pour cette localisation.")
         st.stop()
 
-    st.session_state.last_search_time = current_time
+    st.session_state.last_searches[loc_rate_key] = current_time
 
-    norm_country = country_input.strip()
-    norm_city = city_input.strip()
     norm_domain = domain_input.strip()
-    loc_display = f"{norm_city + ', ' if norm_city else ''}{norm_country}".strip()
 
     # Étape 1 : Lecture du PDF avec pypdf
     with st.spinner("📖 Lecture et extraction du texte du CV..."):
@@ -292,13 +357,14 @@ if search_button:
             raw_offers = []
             sources_status = {}
 
-    # Étape 4 : Affichage OBLIGATOIRE du récapitulatif complet de la recherche
+    # Étape 4 : Affichage OBLIGATOIRE du récapitulatif complet de la recherche (Exigence A.7)
     st.markdown('<div class="recap-box">', unsafe_allow_html=True)
     st.subheader("📍 Récapitulatif de la recherche effectuée")
     col_rec1, col_rec2 = st.columns([1, 1])
 
     with col_rec1:
-        st.markdown(f"**🌍 Localisation ciblée :** `{loc_display if loc_display else 'Non spécifiée'}`")
+        st.markdown(f"**🌍 Pays exact utilisé :** `{norm_country}`")
+        st.markdown(f"**📍 Ville exacte utilisée :** `{norm_city if norm_city else 'Toutes les villes (recherche nationale)'}`")
         st.markdown(f"**💼 Domaine :** `{norm_domain if norm_domain else profile_analysis.get('domain', 'Non spécifié')}`")
         st.markdown(f"**⏱️ Durée :** `{duration_input}`")
         st.markdown("**🔍 Requêtes envoyées aux APIs :**")
@@ -322,6 +388,34 @@ if search_button:
 
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # Exigence B.2 : Zone dépliable « Détails techniques » (Statut Jooble, totalCount, avant/après filtre)
+    with st.expander("🛠️ Détails techniques (Jooble & Sources)", expanded=False):
+        j_info = sources_status.get("Jooble", {})
+        st.markdown("#### 🔍 Source : Jooble")
+        c_j1, c_j2 = st.columns(2)
+        with c_j1:
+            st.markdown(f"- **Statut HTTP :** `{j_info.get('http_status', 'N/A')}`")
+            st.markdown(f"- **totalCount (Jooble) :** `{j_info.get('total_count', 0)}`")
+            st.markdown(f"- **Offres reçues (avant filtre « stage ») :** `{j_info.get('raw_count', 0)}`")
+            st.markdown(f"- **Offres retenues (après filtre « stage ») :** `{j_info.get('filtered_count', 0)}`")
+        with c_j2:
+            st.markdown(f"- **Endpoint contacté :** `{j_info.get('endpoint_masked', 'N/A')}`")
+            st.markdown(f"- **Paramètre location envoyé :** `{j_info.get('location_used', 'N/A')}`")
+            st.markdown(f"- **Mots-clés envoyés :** `{j_info.get('keywords_used', 'N/A')}`")
+            if j_info.get("unconfirmed_fallback"):
+                st.info("ℹ️ *Filtre assoupli : Aucune offre n'a passé le filtre strict de stage. Les offres brutes sont affichées avec la mention « stage non confirmé ».*")
+            if j_info.get("error"):
+                st.caption(f"⚠️ Information : {j_info.get('error')}")
+
+        st.markdown("---")
+        st.markdown("#### 🌐 Autres sources")
+        for s_name in ["Arbeitnow", "Remotive", "Adzuna"]:
+            s_data = sources_status.get(s_name, {})
+            s_cnt = s_data.get("count", 0)
+            s_http = s_data.get("http_status", "200 OK" if s_data.get("ok") else "N/A")
+            s_err = s_data.get("error") or "Aucune erreur"
+            st.markdown(f"- **{s_name}** : `{s_cnt} offre(s)` | Statut : `{s_http}` | Info : *{s_err}*")
+
     # Étape 5 : Analyse de couverture spécifique si aucune source active ne couvre le pays choisi
     cov_info = check_country_coverage(norm_country, {
         "JOOBLE_API_KEY": jooble_key,
@@ -329,21 +423,15 @@ if search_button:
         "ADZUNA_APP_KEY": adzuna_key
     })
 
-    if not cov_info["has_onsite_coverage"]:
-        if cov_info["is_morocco"]:
-            st.warning(
-                "⚠️ **Information géographique : Aucune source active ne couvre actuellement les stages sur site au Maroc.**\n\n"
-                "- **Arbeitnow** et **Adzuna** ne couvrent que l'Europe et certains pays de l'OCDE.\n"
-                "- **Jooble** est l'API qui indexe les offres au Maroc (Casablanca, Rabat, etc.), mais elle nécessite une clé API (`JOOBLE_API_KEY`).\n"
-                "- 🔑 **Pour voir les offres au Maroc :** obtenez votre clé gratuite en 30 secondes sur [jooble.org/api/about](https://jooble.org/api/about) et ajoutez-la dans les **Secrets** de Streamlit (`JOOBLE_API_KEY = \"...\"`).\n\n"
-                "🛡️ *Garantie d'intégrité : Conformément à votre demande, aucune offre physique en France ou en Europe ne vous a été présentée par erreur.*"
-            )
-        else:
-            st.warning(
-                f"⚠️ **Information géographique : Aucune source active ne couvre actuellement les stages sur site pour : {norm_country}.**\n\n"
-                "- Les sources gratuites par défaut (Arbeitnow) se concentrent sur l'Europe.\n"
-                "- Pour débloquer la couverture de votre pays, activez l'API **Jooble** avec une clé gratuite (`JOOBLE_API_KEY`)."
-            )
+    if not cov_info["has_onsite_coverage"] and not is_remote_search:
+        st.warning(
+            f"⚠️ **Information géographique : Aucune source active ne couvre actuellement les stages sur site pour : {norm_country}.**\n\n"
+            f"- **Arbeitnow** ne couvre que l'Europe et le télétravail.\n"
+            f"- **Adzuna** ne couvre pas ce pays ou nécessite des identifiants valides.\n"
+            f"- **Jooble** est l'API capable d'indexer les offres pour ce pays, mais elle nécessite une clé (`JOOBLE_API_KEY`).\n"
+            f"- 🔑 **Pour débloquer la couverture de {norm_country} :** activez votre clé gratuite sur [jooble.org/api/about](https://jooble.org/api/about) et ajoutez-la dans les Secrets de Streamlit (`JOOBLE_API_KEY = \"...\"`).\n\n"
+            f"🛡️ *Garantie d'intégrité : Aucune offre physique d'un autre pays ne vous est présentée.*"
+        )
 
     # Étape 6 : Profil du candidat détecté
     st.success(f"✅ Profil analysé avec succès (Modèle utilisé : `{profile_analysis.get('model_used', 'Gemini')}`) !")
@@ -362,10 +450,10 @@ if search_button:
 
     # Étape 7 : Vérification et affichage des offres
     if not raw_offers:
-        st.info("""
-        💡 **Aucune offre correspondante trouvée pour cette localisation.**
-        - Si vous cherchez au Maroc, pensez à activer Jooble via `JOOBLE_API_KEY` dans vos Secrets.
-        - Vous pouvez également élargir votre recherche à des postes 100% télétravail international (Remote).
+        st.info(f"""
+        💡 **Aucune offre correspondante trouvée pour {loc_display}.**
+        - Pour étendre la couverture de ton pays, assure-toi d'avoir configuré `JOOBLE_API_KEY` dans les Secrets.
+        - Tu peux également sélectionner l'option **« Télétravail / Remote »** pour découvrir des opportunités internationales en distanciel.
         """)
         st.stop()
 
@@ -404,6 +492,7 @@ if search_button:
         source = offer.get("source", "Web")
         justification = offer.get("justification", "Offre correspondant à votre domaine.")
         snippet = offer.get("snippet", "")
+        is_confirmed = offer.get("is_confirmed_stage", True)
 
         with st.container():
             col_info, col_score, col_link = st.columns([5, 1.2, 1.8])
@@ -411,6 +500,8 @@ if search_button:
             with col_info:
                 st.markdown(f"**{title}** — *{company}*")
                 st.caption(f"📍 {location} | Source : `{source}`")
+                if not is_confirmed:
+                    st.markdown('<span class="unconfirmed-badge">⚠️ Stage non confirmé</span>', unsafe_allow_html=True)
                 st.markdown(f"💡 *{justification}*")
                 if snippet:
                     with st.expander("Aperçu de la description", expanded=False):

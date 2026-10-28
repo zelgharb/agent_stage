@@ -13,7 +13,8 @@ from sources import (
     fetch_jooble,
     fetch_adzuna,
     fetch_all_internships,
-    check_country_coverage
+    check_country_coverage,
+    normalize_location
 )
 
 def run_tests():
@@ -24,13 +25,13 @@ def run_tests():
     # 1. Test Arbeitnow
     print("\n[1/5] Test de la source Arbeitnow (Gratuit, sans clé)...")
     an_offers, an_status = fetch_arbeitnow(
-        queries=["stage python", "data intern", "software"],
+        queries=["stage", "intern", "data"],
         country="France",
-        city="Paris",
+        city="",
         max_results=10
     )
     if an_status.get("ok"):
-        print(f"  ✅ Succès : {len(an_offers)} offres de stage réelles récupérées pour France/Paris.")
+        print(f"  ✅ Succès : {len(an_offers)} offres de stage réelles récupérées pour France.")
         if an_offers:
             sample = an_offers[0]
             print(f"     Exemple : \"{sample['title']}\" chez {sample['company']}")
@@ -43,9 +44,9 @@ def run_tests():
     # 2. Test Remotive
     print("\n[2/5] Test de la source Remotive (Gratuit, sans clé)...")
     rem_offers, rem_status = fetch_remotive(
-        queries=["python", "developer", "data"],
-        country="Maroc",
-        city="Casablanca",
+        queries=["developer", "data", "python"],
+        country="Télétravail / Remote",
+        city="",
         max_results=5
     )
     if rem_status.get("ok"):
@@ -85,14 +86,13 @@ def run_tests():
     for o in morocco_offers:
         loc_lower = (o.get("location") or "").lower()
         title = o.get("title", "")
-        # Vérifier qu'aucune offre ne mentionne Paris, France ou l'Allemagne
         assert "paris" not in loc_lower, f"❌ ERREUR : Offre de Paris renvoyée pour le Maroc ! ({title} à {loc_lower})"
         assert "france" not in loc_lower, f"❌ ERREUR : Offre de France renvoyée pour le Maroc ! ({title} à {loc_lower})"
         assert "germany" not in loc_lower, f"❌ ERREUR : Offre d'Allemagne renvoyée pour le Maroc ! ({title} à {loc_lower})"
         assert "berlin" not in loc_lower, f"❌ ERREUR : Offre de Berlin renvoyée pour le Maroc ! ({title} à {loc_lower})"
         assert "munich" not in loc_lower, f"❌ ERREUR : Offre de Munich renvoyée pour le Maroc ! ({title} à {loc_lower})"
 
-    print("  ✅ Zéro contamination : AUCUNE offre physique de France/Paris/Europe n'a été renvoyée pour le Maroc !")
+    print("  ✅ Zéro contamination : AUCUNE offre physique de France/Europe n'a été renvoyée pour le Maroc !")
 
     # 4. Test Jooble (si clé présente)
     print("\n[4/5] Test de la source Jooble (Maroc & Monde)...")
@@ -128,7 +128,8 @@ def run_tests():
         city="Casablanca"
     )
     assert not ad_status_ma.get("ok")
-    assert "ne couvre pas le maroc" in (ad_status_ma.get("error") or "").lower()
+    err = (ad_status_ma.get("error") or "").lower()
+    assert "pas couvert" in err or "ne couvre pas" in err
     print("  ✅ Adzuna rejette proprement les recherches pour le Maroc car non couvert.")
 
     print("\n" + "=" * 70)
