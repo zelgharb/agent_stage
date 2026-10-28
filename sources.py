@@ -6,6 +6,7 @@ Filtrage géographique strict pour respecter le pays et la ville choisis.
 
 import html
 import re
+import urllib.parse
 import requests
 from typing import List, Dict, Any, Tuple
 
@@ -574,3 +575,98 @@ def fetch_all_internships(
             break
             
     return deduped_offers, sources_status
+
+
+def build_quick_search_keywords(domain: str = "", key_skills: List[str] = None) -> str:
+    """
+    Construit les mots-clés de recherche à partir du domaine et des compétences clés du profil Gemini.
+    Aucune valeur par défaut n'est injectée.
+    """
+    parts = []
+    seen = set()
+    
+    # 1. Domaine (saisi ou détecté)
+    if domain and domain.strip():
+        d = domain.strip()
+        parts.append(d)
+        for w in d.lower().split():
+            seen.add(w)
+            
+    # 2. Compétences / mots-clés issus du profil Gemini
+    if key_skills:
+        for skill in key_skills:
+            s_clean = skill.strip()
+            if not s_clean:
+                continue
+            words = s_clean.lower().split()
+            # Éviter de dupliquer les termes déjà présents dans le domaine
+            if not any(w in seen for w in words):
+                parts.append(s_clean)
+                for w in words:
+                    seen.add(w)
+            # Limiter à 2 éléments (domaine + 1 compétence ou 2 compétences) pour des requêtes précises et efficaces
+            if len(parts) >= 2:
+                break
+                
+    return " ".join(parts).strip()
+
+
+def generate_quick_search_urls(
+    country: str = "",
+    city: str = "",
+    domain: str = "",
+    key_skills: List[str] = None
+) -> Dict[str, Any]:
+    """
+    Génère les liens de recherche rapide sans scraping ni appel réseau côté serveur.
+    URLs encodées proprement avec urllib.parse.quote_plus, sans aucune valeur par défaut.
+    
+    Format :
+    - LinkedIn : https://www.linkedin.com/jobs/search/?keywords={mots-clés encodés}+stage&location={ville, pays encodés}
+    - Google ciblé : https://www.google.com/search?q=stage+{mots-clés}+{ville}+site:{site}
+      pour rekrute.com, emploi.ma, indeed.com
+    """
+    norm_country = country.strip() if country else ""
+    norm_city = city.strip() if city else ""
+    keywords = build_quick_search_keywords(domain=domain, key_skills=key_skills or [])
+    
+    # 1. LinkedIn : keywords={mots-clés encodés}+stage&location={ville, pays encodés}
+    kw_encoded = urllib.parse.quote_plus(keywords) if keywords else ""
+    if kw_encoded:
+        linkedin_kw = f"{kw_encoded}+stage"
+    else:
+        linkedin_kw = "stage"
+        
+    loc_parts = [p for p in [norm_city, norm_country] if p]
+    loc_raw = ", ".join(loc_parts)
+    linkedin_loc = urllib.parse.quote_plus(loc_raw) if loc_raw else ""
+    
+    linkedin_url = f"https://www.linkedin.com/jobs/search/?keywords={linkedin_kw}&location={linkedin_loc}"
+    
+    # 2. Google ciblé : https://www.google.com/search?q=stage+{mots-clés}+{ville}+site:{site}
+    # Pour rekrute.com, emploi.ma, indeed.com
+    target_sites = ["rekrute.com", "emploi.ma", "indeed.com"]
+    google_urls = {}
+    
+    # Token de localisation pour Google ({ville} ou repli sur {pays} si ville non saisie)
+    loc_token = norm_city if norm_city else (norm_country if norm_country else "")
+    
+    for site in target_sites:
+        g_parts = ["stage"]
+        if keywords:
+            g_parts.append(keywords)
+        if loc_token:
+            g_parts.append(loc_token)
+        g_parts.append(f"site:{site}")
+        
+        g_query = " ".join(g_parts)
+        g_encoded = urllib.parse.quote_plus(g_query, safe=":")
+        google_urls[site] = f"https://www.google.com/search?q={g_encoded}"
+        
+    return {
+        "keywords": keywords,
+        "location": loc_raw,
+        "linkedin": linkedin_url,
+        "google": google_urls
+    }
+

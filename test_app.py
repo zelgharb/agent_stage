@@ -9,7 +9,7 @@ Test d'intégration local validant la logique complète de l'application :
 
 import os
 import pypdf
-from sources import fetch_all_internships
+from sources import fetch_all_internships, generate_quick_search_urls
 from gemini_client import clean_json_response
 
 def test_pdf_extraction():
@@ -51,6 +51,20 @@ def test_json_cleaner():
     assert cleaned == '{"summary": "test", "score": 90}'
     print("  ✅ Nettoyage des balises Markdown validé.")
 
+def test_quick_searches():
+    print("\n[4] Test de la génération des liens de Recherches Rapides...")
+    res = generate_quick_search_urls(
+        country="Maroc",
+        city="Casablanca",
+        domain="Data Science",
+        key_skills=["Python", "SQL"]
+    )
+    assert res["linkedin"] == "https://www.linkedin.com/jobs/search/?keywords=Data+Science+Python+stage&location=Casablanca%2C+Maroc"
+    assert res["google"]["rekrute.com"] == "https://www.google.com/search?q=stage+Data+Science+Python+Casablanca+site:rekrute.com"
+    assert res["google"]["emploi.ma"] == "https://www.google.com/search?q=stage+Data+Science+Python+Casablanca+site:emploi.ma"
+    assert res["google"]["indeed.com"] == "https://www.google.com/search?q=stage+Data+Science+Python+Casablanca+site:indeed.com"
+    print("  ✅ Liens LinkedIn et Google (rekrute.com, emploi.ma, indeed.com) correctement formatés et encodés.")
+
 if __name__ == "__main__":
     print("=" * 60)
     print("🧪 DÉBUT DES TESTS D'INTÉGRATION LOCAUX")
@@ -58,6 +72,7 @@ if __name__ == "__main__":
     test_pdf_extraction()
     test_offers_pipeline()
     test_json_cleaner()
+    test_quick_searches()
     print("=" * 60)
     print("🎉 TOUS LES TESTS D'INTÉGRATION SONT AU VERT !")
     print("=" * 60)

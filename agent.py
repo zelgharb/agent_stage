@@ -10,7 +10,7 @@ import streamlit as st
 import pypdf
 from typing import List, Dict, Any, Tuple
 
-from sources import fetch_all_internships, check_country_coverage
+from sources import fetch_all_internships, check_country_coverage, generate_quick_search_urls
 from gemini_client import analyze_cv, evaluate_offers
 
 # Configuration de la page
@@ -363,70 +363,122 @@ if search_button:
     # Étape 7 : Vérification et affichage des offres
     if not raw_offers:
         st.info("""
-        💡 **Aucune offre correspondante trouvée pour cette localisation.**
+        💡 **Aucune offre correspondante trouvée pour cette localisation via les APIs configurées.**
         - Si vous cherchez au Maroc, pensez à activer Jooble via `JOOBLE_API_KEY` dans vos Secrets.
         - Vous pouvez également élargir votre recherche à des postes 100% télétravail international (Remote).
+        - Utilisez la section **Recherches rapides** ci-dessous pour trouver immédiatement des opportunités réelles.
         """)
-        st.stop()
+    else:
+        targeted_offers = raw_offers[:30]
 
-    targeted_offers = raw_offers[:30]
+        with st.spinner(f"🎯 Évaluation et notation de {len(targeted_offers)} offres par l'IA..."):
+            try:
+                scored_offers, cv_tips, eval_model = evaluate_offers(
+                    profile_data=profile_analysis,
+                    offers=targeted_offers,
+                    cv_language=profile_analysis.get("language", "fr"),
+                    api_key=gemini_key
+                )
+            except Exception as e:
+                st.error(f"❌ Erreur lors de la notation des offres : {str(e)}")
+                scored_offers = targeted_offers
+                cv_tips = []
+                eval_model = "None"
 
-    with st.spinner(f"🎯 Évaluation et notation de {len(targeted_offers)} offres par l'IA..."):
-        try:
-            scored_offers, cv_tips, eval_model = evaluate_offers(
-                profile_data=profile_analysis,
-                offers=targeted_offers,
-                cv_language=profile_analysis.get("language", "fr"),
-                api_key=gemini_key
-            )
-        except Exception as e:
-            st.error(f"❌ Erreur lors de la notation des offres : {str(e)}")
-            scored_offers = targeted_offers
-            cv_tips = []
-            eval_model = "None"
-
-    st.markdown("---")
-    st.subheader(f"🏆 Offres de stage recommandées ({len(scored_offers)})")
-
-    for offer in scored_offers:
-        score = offer.get("score", 50)
-        if score >= 75:
-            badge_class = "score-badge-high"
-        elif score >= 50:
-            badge_class = "score-badge-mid"
-        else:
-            badge_class = "score-badge-low"
-
-        title = offer.get("title", "Poste sans titre")
-        company = offer.get("company", "Entreprise")
-        location = offer.get("location", "Lieu non précisé")
-        url = offer.get("url", "#")
-        source = offer.get("source", "Web")
-        justification = offer.get("justification", "Offre correspondant à votre domaine.")
-        snippet = offer.get("snippet", "")
-
-        with st.container():
-            col_info, col_score, col_link = st.columns([5, 1.2, 1.8])
-            
-            with col_info:
-                st.markdown(f"**{title}** — *{company}*")
-                st.caption(f"📍 {location} | Source : `{source}`")
-                st.markdown(f"💡 *{justification}*")
-                if snippet:
-                    with st.expander("Aperçu de la description", expanded=False):
-                        st.write(snippet)
-                        
-            with col_score:
-                st.markdown(f'<span class="{badge_class}">Score : {score} / 100</span>', unsafe_allow_html=True)
-                
-            with col_link:
-                st.markdown(f'<a href="{url}" target="_blank" style="text-decoration:none;"><button style="background-color:#059669;color:white;border:none;padding:0.4rem 0.8rem;border-radius:6px;cursor:pointer;width:100%;">Voir l\'offre ↗</button></a>', unsafe_allow_html=True)
-
-            st.markdown("<hr style='margin: 0.8rem 0; border: none; border-top: 1px solid #E2E8F0;'/>", unsafe_allow_html=True)
-
-    # 3 conseils d'amélioration du CV
-    if cv_tips:
         st.markdown("---")
-        st.subheader("💡 3 Conseils personnalisés pour optimiser ton CV")
-        for tip in cv_tips[:3]:
-            st.info(f"✨ {tip}")
+        st.subheader(f"🏆 Offres de stage recommandées ({len(scored_offers)})")
+
+        for offer in scored_offers:
+            score = offer.get("score", 50)
+            if score >= 75:
+                badge_class = "score-badge-high"
+            elif score >= 50:
+                badge_class = "score-badge-mid"
+            else:
+                badge_class = "score-badge-low"
+
+            title = offer.get("title", "Poste sans titre")
+            company = offer.get("company", "Entreprise")
+            location = offer.get("location", "Lieu non précisé")
+            url = offer.get("url", "#")
+            source = offer.get("source", "Web")
+            justification = offer.get("justification", "Offre correspondant à votre domaine.")
+            snippet = offer.get("snippet", "")
+
+            with st.container():
+                col_info, col_score, col_link = st.columns([5, 1.2, 1.8])
+                
+                with col_info:
+                    st.markdown(f"**{title}** — *{company}*")
+                    st.caption(f"📍 {location} | Source : `{source}`")
+                    st.markdown(f"💡 *{justification}*")
+                    if snippet:
+                        with st.expander("Aperçu de la description", expanded=False):
+                            st.write(snippet)
+                            
+                with col_score:
+                    st.markdown(f'<span class="{badge_class}">Score : {score} / 100</span>', unsafe_allow_html=True)
+                    
+                with col_link:
+                    st.markdown(f'<a href="{url}" target="_blank" style="text-decoration:none;"><button style="background-color:#059669;color:white;border:none;padding:0.4rem 0.8rem;border-radius:6px;cursor:pointer;width:100%;">Voir l\'offre ↗</button></a>', unsafe_allow_html=True)
+
+                st.markdown("<hr style='margin: 0.8rem 0; border: none; border-top: 1px solid #E2E8F0;'/>", unsafe_allow_html=True)
+
+        # 3 conseils d'amélioration du CV
+        if cv_tips:
+            st.markdown("---")
+            st.subheader("💡 3 Conseils personnalisés pour optimiser ton CV")
+            for tip in cv_tips[:3]:
+                st.info(f"✨ {tip}")
+
+    # Étape 8 : Section « Recherches rapides » (Toujours affichée sous les résultats)
+    st.markdown("---")
+
+    effective_domain = norm_domain if norm_domain else profile_analysis.get("domain", "")
+    profile_skills = profile_analysis.get("key_skills", [])
+
+    quick_searches = generate_quick_search_urls(
+        country=norm_country,
+        city=norm_city,
+        domain=effective_domain,
+        key_skills=profile_skills
+    )
+
+    has_onsite_cov = cov_info.get("has_onsite_coverage", False)
+
+    # Affichage en évidence quand aucune source API ne couvre le pays choisi
+    if not has_onsite_cov:
+        st.markdown(f"""
+        <div style="background-color: #FEF3C7; border: 2px solid #F59E0B; border-radius: 8px; padding: 1.2rem; margin-bottom: 1.2rem;">
+            <div style="font-size: 1.25rem; font-weight: 700; color: #92400E; margin-bottom: 0.4rem;">
+                ⚡ Recherches rapides (Recommandé pour votre recherche)
+            </div>
+            <div style="color: #78350F; font-size: 0.95rem;">
+                ⚠️ <strong>Aucune source API active ne couvre actuellement les stages sur site pour : {norm_country or 'cette région'}.</strong><br/>
+                Ces liens directs sur-mesure générés d'après votre profil vous permettent d'accéder instantanément aux offres réelles sur les plateformes officielles.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.subheader("⚡ Recherches rapides")
+        st.markdown("Accédez directement aux opportunités actualisées sur les sites officiels ciblés selon votre profil :")
+
+    # Liens cliquables avec st.link_button
+    col_q1, col_q2, col_q3, col_q4 = st.columns(4)
+    with col_q1:
+        st.link_button("💼 LinkedIn Jobs", quick_searches["linkedin"], use_container_width=True)
+    with col_q2:
+        st.link_button("🏢 Rekrute.com", quick_searches["google"]["rekrute.com"], use_container_width=True)
+    with col_q3:
+        st.link_button("💼 Emploi.ma", quick_searches["google"]["emploi.ma"], use_container_width=True)
+    with col_q4:
+        st.link_button("🔎 Indeed", quick_searches["google"]["indeed.com"], use_container_width=True)
+
+    # Mention obligatoire
+    st.caption("« Ces liens ouvrent les sites officiels, où tu es connecté avec ton propre compte. »")
+
+    # Rappel des critères appliqués sans valeur par défaut
+    applied_kw = quick_searches.get("keywords", "")
+    applied_loc = quick_searches.get("location", "")
+    if applied_kw or applied_loc:
+        st.caption(f"🎯 *Paramètres appliqués :* Mots-clés = `{applied_kw or 'Tous'}` | Localisation = `{applied_loc or 'Non spécifiée'}`")
