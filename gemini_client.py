@@ -2,6 +2,7 @@
 Module d'intégration avec l'API Gemini.
 Gestion de cascade de modèles, retry 503 (attente 3s puis 6s), bascule 429 (quota).
 Protection stricte de la clé API et intégrité des liens d'offres.
+Aucun exemple biaisé (zéro mention de Paris/France par défaut).
 """
 
 import json
@@ -21,7 +22,6 @@ GEMINI_MODELS = [
 def clean_json_response(raw_text: str) -> str:
     """Nettoie le texte reçu pour isoler l'objet JSON valide."""
     text = raw_text.strip()
-    # Supprimer les balises Markdown éventuelles ```json ... ```
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text)
@@ -88,7 +88,7 @@ def call_gemini_with_fallback(
                         if parts and "text" in parts[0]:
                             return parts[0]["text"], model
                     errors_log.append(f"{model}: Réponse vide ou structure inattendue.")
-                    break # Passer au modèle suivant
+                    break
                 
                 # Cas 503 (Surcharge)
                 elif resp.status_code == 503:
@@ -104,7 +104,6 @@ def call_gemini_with_fallback(
                         time.sleep(wait_sec)
                         continue
                     else:
-                        # Après 3 tentatives 503, basculer au modèle suivant
                         break
                         
                 # Cas 429 (Quota dépassé)
@@ -115,7 +114,6 @@ def call_gemini_with_fallback(
                     except Exception:
                         err_msg = resp.text
                     errors_log.append(f"{model} (HTTP 429 Quota dépassé): {err_msg}")
-                    # Basculer immédiatement au modèle suivant
                     break
                     
                 # Erreur 400 (ex: mauvaise clé API)
@@ -125,7 +123,6 @@ def call_gemini_with_fallback(
                         err_msg = resp.json().get("error", {}).get("message", resp.text)
                     except Exception:
                         err_msg = resp.text
-                    # Si clé invalide, inutile de tester d'autres modèles avec la même clé
                     if "API key" in err_msg or resp.status_code in [401, 403]:
                         raise RuntimeError(f"Erreur d'authentification Gemini ({resp.status_code}): {err_msg}")
                     errors_log.append(f"{model} (HTTP {resp.status_code}): {err_msg}")
@@ -144,7 +141,6 @@ def call_gemini_with_fallback(
                 else:
                     break
 
-    # Si tous les modèles ont échoué, afficher la liste réelle des erreurs
     detailed_errors = " | ".join(errors_log)
     raise RuntimeError(
         f"Impossible d'obtenir une réponse de Gemini après bascule automatique sur les 4 modèles "
@@ -160,14 +156,18 @@ def analyze_cv(
 ) -> Dict[str, Any]:
     """
     Étape 2 : Analyse le CV et génère le profil ainsi que 3 à 5 requêtes de recherche.
+    Strictement ancré sur la localisation demandée, sans aucun biais.
     """
     truncated_cv = cv_text[:8000]
+    target_loc = country_city.strip() if country_city and country_city.strip() else "International / Non spécifié"
     
     system_instruction = (
-        "Tu es un expert en recrutement et orientation professionnelle de haut niveau. "
+        "Tu es un expert en recrutement et orientation professionnelle. "
         "Ton rôle est d'analyser le CV d'un candidat pour lui trouver des stages réels pertinents. "
         "Important : Détecte la langue principale du CV et réponds STRICTEMENT dans cette langue. "
-        "Réponds UNIQUEMENT sous forme de JSON valide conforme au schéma demandé."
+        f"RÈGLE GÉOGRAPHIQUE CRITIQUE : Le candidat a spécifié comme localisation cible : '{target_loc}'. "
+        "Tu ne dois JAMAIS mentionner une autre ville ou un autre pays dans tes requêtes de recherche. "
+        "Réponds UNIQUEMENT sous forme de JSON valide conforme au schéma."
     )
     
     prompt = f"""
@@ -177,7 +177,7 @@ Voici le texte extrait du CV du candidat (tronqué à 8000 caractères) :
 ---
 
 Critères de recherche spécifiés par le candidat :
-- Pays / Ville souhaités : {country_city if country_city else "Non spécifié"}
+- Localisation géographique demandée : {target_loc}
 - Domaine souhaité : {domain if domain else "Non spécifié (à déduire du CV)"}
 - Durée du stage souhaitée : {duration if duration else "Non spécifiée"}
 
@@ -185,7 +185,12 @@ Consignes :
 1. Détecte la langue du CV (ex: 'fr', 'en', 'es', etc.).
 2. Rédige un résumé du profil en EXACTEMENT 3 lignes dans la langue du CV.
 3. Identifie le domaine principal et une liste de 5 à 8 compétences clés (hard & soft skills).
-4. Génère entre 3 et 5 requêtes de recherche spécifiques pour trouver des STAGES (ex: 'Stage Data Science Paris', 'Internship Software Engineer', etc.), adaptées au pays demandé ({country_city}) et à la langue du marché.
+4. Génère entre 3 et 5 requêtes de recherche de STAGES adaptées à la localisation demandée ('{target_loc}').
+
+RÈGLES STRICTES DE RECHERCHE :
+- Si une localisation est demandée ('{target_loc}'), tes requêtes avec mention géographique doivent cibler UNIQUEMENT '{target_loc}'.
+- N'inclus JAMAIS d'autre pays ou ville (interdiction formelle d'ajouter 'France' ou 'Paris' si la demande est '{target_loc}').
+- Formule aussi des requêtes basées sur les compétences et l'intitulé du poste sans ville (ex: 'Stage Machine Learning', 'Intern Python Developer').
 
 Schéma JSON attendu :
 {{
@@ -231,7 +236,6 @@ def evaluate_offers(
     if not offers:
         return [], ["Élargis tes critères géographiques.", "Ajoute des projets concrets sur ton CV.", "Précise tes outils techniques."], "aucun"
 
-    # Préparer le payload anonymisé sans URL
     offers_payload = []
     for idx, o in enumerate(offers, 1):
         offers_payload.append({
@@ -255,7 +259,7 @@ Profil du candidat :
 - Domaine : {profile_data.get('domain', '')}
 - Compétences clés : {', '.join(profile_data.get('key_skills', []))}
 
-Voici la liste des offres de stage à évaluer (identifiées par leur ID) :
+Voici la liste des offres de stage réelles à évaluer (identifiées par leur ID) :
 {json.dumps(offers_payload, ensure_ascii=False, indent=2)}
 
 Tâches :
@@ -296,7 +300,6 @@ Schéma JSON attendu :
 
     eval_map = {item["id"]: item for item in eval_data.get("evaluations", []) if "id" in item}
     
-    # Rapprochement avec les offres d'origine : les vrais liens sont préservés à 100%
     scored_offers = []
     for idx, original_offer in enumerate(offers, 1):
         ev = eval_map.get(idx, {})
@@ -310,13 +313,11 @@ Schéma JSON attendu :
             
         justification = ev.get("justification", "Offre en lien avec votre domaine d'activité.")
         
-        # Copie de l'offre originale
         scored_offer = dict(original_offer)
         scored_offer["score"] = score
         scored_offer["justification"] = justification
         scored_offers.append(scored_offer)
 
-    # Tri décroissant par score
     scored_offers.sort(key=lambda x: x.get("score", 0), reverse=True)
     tips = eval_data.get("tips", [])
     if not tips:

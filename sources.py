@@ -1,6 +1,7 @@
 """
 Module de gestion des sources réelles d'offres de stage.
 Aucun lien inventé : toutes les URLs proviennent directement des APIs interrogées.
+Filtrage géographique strict pour respecter le pays et la ville choisis.
 """
 
 import html
@@ -8,11 +9,43 @@ import re
 import requests
 from typing import List, Dict, Any, Tuple
 
+# Mots-clés stricts désignant des stages ou formations
 INTERNSHIP_KEYWORDS = [
     "stage", "stagiaire", "intern", "internship", "pfe", "werkstudent",
     "working student", "trainee", "praktik", "praktikum", "alternance",
     "apprenti", "apprentice", "student"
 ]
+
+# Pays européens couverts par Arbeitnow
+ARBEITNOW_COUNTRIES = [
+    "allemagne", "germany", "deutschland", "france", "suisse", "switzerland",
+    "schweiz", "pays-bas", "netherlands", "nederland", "royaume-uni",
+    "united kingdom", "uk", "autriche", "austria", "österreich",
+    "belgique", "belgium", "belgië", "espagne", "spain", "italie", "italy",
+    "irlande", "ireland", "europe"
+]
+
+# Codes pays supportés par l'API Adzuna (le Maroc n'en fait pas partie)
+ADZUNA_COUNTRY_CODES = {
+    "france": "fr", "fr": "fr",
+    "royaume-uni": "gb", "united kingdom": "gb", "uk": "gb", "gb": "gb",
+    "etats-unis": "us", "united states": "us", "usa": "us", "us": "us",
+    "allemagne": "de", "germany": "de", "deutschland": "de", "de": "de",
+    "canada": "ca", "ca": "ca",
+    "belgique": "be", "belgium": "be", "be": "be",
+    "suisse": "ch", "switzerland": "ch", "ch": "ch",
+    "espagne": "es", "spain": "es", "es": "es",
+    "italie": "it", "italy": "it", "it": "it",
+    "pays-bas": "nl", "netherlands": "nl", "nl": "nl",
+    "autriche": "at", "austria": "at", "at": "at",
+    "australie": "au", "australia": "au", "au": "au",
+    "bresil": "br", "brazil": "br", "br": "br",
+    "inde": "in", "india": "in", "in": "in",
+    "mexique": "mx", "mexico": "mx", "mx": "mx",
+    "nouvelle-zelande": "nz", "new zealand": "nz", "nz": "nz",
+    "pologne": "pl", "poland": "pl", "pl": "pl",
+    "afrique du sud": "za", "south africa": "za", "za": "za"
+}
 
 def clean_html(raw_html: str) -> str:
     """Nettoie les balises HTML et entités d'un texte."""
@@ -31,7 +64,6 @@ def is_internship_match(title: str, description: str = "", job_types: List[str] 
     
     # 1. Dans le titre (critère très fort)
     for kw in INTERNSHIP_KEYWORDS:
-        # Correspondance par mot entier ou délimité
         if re.search(rf"\b{re.escape(kw)}\b", title_lower):
             return True
             
@@ -40,7 +72,7 @@ def is_internship_match(title: str, description: str = "", job_types: List[str] 
         if any(kw in t for t in types_lower) or any(kw in t for t in tags_lower):
             return True
             
-    # 3. Dans la description si terme explicite en début de texte
+    # 3. Dans la description si terme explicite
     for kw in ["stage de fin d'études", "stage pfe", "internship position", "internship program", "sujet de stage"]:
         if kw in desc_lower:
             return True
@@ -48,10 +80,50 @@ def is_internship_match(title: str, description: str = "", job_types: List[str] 
     return False
 
 def matches_query(text: str, query: str) -> bool:
-    """Vérifie si un texte contient au moins l'un des mots-clés d'une requête."""
+    """Vérifie si un texte contient au moins un des mots-clés d'une requête."""
     terms = [w.lower() for w in re.findall(r"\w+", query) if len(w) > 2]
     text_lower = text.lower()
     return any(t in text_lower for t in terms)
+
+def check_country_coverage(country: str, secrets: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Analyse quelles sources actives couvrent le pays demandé.
+    """
+    c_lower = country.strip().lower()
+    has_jooble = bool(secrets.get("JOOBLE_API_KEY"))
+    has_adzuna = bool(secrets.get("ADZUNA_APP_ID") and secrets.get("ADZUNA_APP_KEY"))
+    
+    is_morocco = c_lower in ["maroc", "morocco", "ma"]
+    is_europe = any(ec in c_lower for ec in ARBEITNOW_COUNTRIES)
+    is_adzuna_country = c_lower in ADZUNA_COUNTRY_CODES
+    
+    active_onsite_sources = []
+    inactive_potential_sources = []
+    
+    if is_morocco:
+        if has_jooble:
+            active_onsite_sources.append("Jooble (Maroc)")
+        else:
+            inactive_potential_sources.append("Jooble (clé manquante)")
+    elif is_europe:
+        active_onsite_sources.append("Arbeitnow (Europe)")
+        if has_adzuna and is_adzuna_country:
+            active_onsite_sources.append("Adzuna")
+        if has_jooble:
+            active_onsite_sources.append("Jooble")
+    else:
+        if has_jooble:
+            active_onsite_sources.append("Jooble")
+        if has_adzuna and is_adzuna_country:
+            active_onsite_sources.append("Adzuna")
+
+    return {
+        "is_morocco": is_morocco,
+        "is_europe": is_europe,
+        "has_onsite_coverage": len(active_onsite_sources) > 0,
+        "active_sources": active_onsite_sources,
+        "missing_sources": inactive_potential_sources
+    }
 
 def fetch_arbeitnow(
     queries: List[str],
@@ -61,9 +133,29 @@ def fetch_arbeitnow(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Interroge l'API Arbeitnow (gratuite, sans clé requise).
-    Excellente couverture pour l'Europe et le télétravail.
+    Couverture RÉELLE : Allemagne, France, Suisse, Pays-Bas, UK, et Remote européen.
+    NE COUVRE PAS : Le Maroc ou les pays hors Europe sur site physique.
     """
-    status = {"name": "Arbeitnow", "ok": False, "count": 0, "error": None}
+    status = {
+        "name": "Arbeitnow",
+        "ok": False,
+        "count": 0,
+        "error": None,
+        "coverage_desc": "Europe & Télétravail (Ne couvre pas le Maroc sur site)"
+    }
+    
+    target_country = country.strip().lower()
+    target_city = city.strip().lower()
+    is_target_morocco = target_country in ["maroc", "morocco", "ma"]
+    is_target_europe = any(ec in target_country for ec in ARBEITNOW_COUNTRIES)
+    
+    # Si le pays demandé est explicitement le Maroc (ou hors Europe), Arbeitnow n'a pas d'offres sur site
+    if is_target_morocco:
+        status["ok"] = True
+        status["count"] = 0
+        status["error"] = "Arbeitnow ne couvre pas le Maroc (réservé à l'Europe)"
+        return [], status
+
     url = "https://www.arbeitnow.com/api/job-board-api"
     headers = {"User-Agent": "Mozilla/5.0 (InternshipAgent/1.0)"}
     
@@ -76,8 +168,6 @@ def fetch_arbeitnow(
         data = resp.json().get("data", [])
         matched = []
         
-        target_loc = f"{city} {country}".strip().lower()
-        
         for item in data:
             title = item.get("title", "")
             raw_desc = item.get("description", "")
@@ -88,26 +178,33 @@ def fetch_arbeitnow(
             job_url = item.get("url", "")
             company = item.get("company_name", "Entreprise confidentielle")
             
-            # Vérifier que l'URL existe
             if not job_url:
                 continue
                 
-            # Filtrer pour ne garder que les stages
+            # Filtrer strictement les stages
             if not is_internship_match(title, snippet, job_types, tags):
                 continue
                 
-            # Filtrer par localisation si spécifiée
             loc_lower = location.lower()
-            if target_loc:
-                # Si localisation demandée, privilégier correspondance ou remote
-                is_remote = item.get("remote", False) or "remote" in loc_lower or "télétravail" in loc_lower
-                matches_loc = any(part in loc_lower for part in target_loc.split() if len(part) > 2)
-                # Accepter si match direct de localisation OU si l'offre est remote
-                if not (matches_loc or is_remote):
-                    # Ne pas rejeter immédiatement si peu d'offres, mais baisser priorité
-                    pass
+            is_job_remote = bool(item.get("remote")) or "remote" in loc_lower or "télétravail" in loc_lower
             
-            # Matching avec requêtes si fournies
+            # FILTRAGE GÉOGRAPHIQUE STRICT
+            if target_country or target_city:
+                matches_city = bool(target_city and target_city in loc_lower)
+                matches_country = bool(target_country and target_country in loc_lower)
+                
+                # Si l'utilisateur a ciblé une ville ou un pays :
+                if matches_city or matches_country:
+                    # Match géographique direct !
+                    pass
+                elif is_job_remote and (is_target_europe or not target_country):
+                    # Accepter le télétravail européen si recherche Europe
+                    pass
+                else:
+                    # REJET STRICT : ne jamais renvoyer une offre physique non correspondante
+                    continue
+
+            # Matching par mot-clé / requête
             full_text = f"{title} {snippet} {' '.join(tags)}"
             if queries:
                 if any(matches_query(full_text, q) for q in queries):
@@ -148,25 +245,33 @@ def fetch_remotive(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Interroge l'API Remotive (gratuite, sans clé requise).
-    Idéal pour les opportunités remote mondiales.
+    Couverture RÉELLE : 100% télétravail international (Remote mondial).
+    Ne propose AUCUNE offre physique sur site.
     """
-    status = {"name": "Remotive", "ok": False, "count": 0, "error": None}
+    status = {
+        "name": "Remotive",
+        "ok": False,
+        "count": 0,
+        "error": None,
+        "coverage_desc": "100% Télétravail mondial (Remote)"
+    }
     headers = {"User-Agent": "Mozilla/5.0 (InternshipAgent/1.0)"}
     matched = []
     
-    # Extraire les mots-clés principaux des requêtes
+    # Extraire les mots-clés principaux
     search_keywords = []
     for q in queries:
         for w in re.findall(r"\w+", q):
             w_lower = w.lower()
-            if w_lower not in ["stage", "intern", "internship", "pour", "dans", "avec", "the", "and"] and len(w_lower) > 2:
+            if w_lower not in ["stage", "intern", "internship", "maroc", "france", "paris", "casablanca", "pour", "dans", "avec", "the", "and"] and len(w_lower) > 2:
                 search_keywords.append(w_lower)
     search_keywords = list(dict.fromkeys(search_keywords))[:3]
     if not search_keywords:
         search_keywords = ["intern"]
 
+    target_country = country.strip().lower()
+
     try:
-        # Recherche ciblée sur les mots-clés
         for kw in search_keywords:
             url = f"https://remotive.com/api/remote-jobs?search={kw}"
             resp = requests.get(url, headers=headers, timeout=10)
@@ -178,17 +283,27 @@ def fetch_remotive(
                     if not job_url:
                         continue
                     company = j.get("company_name", "Entreprise confidentielle")
-                    location = j.get("candidate_required_location", "Remote / Télétravail")
+                    req_loc = j.get("candidate_required_location", "Worldwide")
+                    req_loc_lower = (req_loc or "").lower()
+                    
+                    # FILTRAGE GÉOGRAPHIQUE REMOTIVE :
+                    # Si une offre requiert un pays spécifique incompatible (ex: USA only alors qu'on est au Maroc)
+                    is_worldwide = any(w in req_loc_lower for w in ["worldwide", "anywhere", "all", "global"])
+                    is_loc_match = bool(target_country and target_country in req_loc_lower)
+                    
+                    if not (is_worldwide or is_loc_match):
+                        # Exclure les offres restreintes à d'autres zones (ex: USA Only, UK Only)
+                        continue
+
                     snippet = clean_html(j.get("description", ""))[:300]
                     job_type = j.get("job_type", "")
                     tags = j.get("tags", [])
                     
-                    # Vérifier stage ou profil junior/étudiant
                     if is_internship_match(title, snippet, [job_type], tags) or any(t in title.lower() for t in ["intern", "junior", "trainee", "student"]):
                         matched.append({
                             "title": title,
                             "company": company,
-                            "location": f"Remote ({location})" if location else "Remote",
+                            "location": f"Remote ({req_loc})" if req_loc else "Remote (Worldwide)",
                             "url": job_url,
                             "snippet": snippet,
                             "source": "Remotive"
@@ -213,15 +328,22 @@ def fetch_jooble(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Interroge l'API Jooble (clé gratuite disponible sur jooble.org/api/about).
-    Permet de couvrir le Maroc et plus de 70 pays.
+    Couverture RÉELLE : Le Maroc (via ma.jooble.org), la France (fr.jooble.org), et 70+ pays.
+    Prend en compte le paramètre 'location' (ville et pays).
     """
-    status = {"name": "Jooble", "ok": False, "count": 0, "error": None}
+    status = {
+        "name": "Jooble",
+        "ok": False,
+        "count": 0,
+        "error": None,
+        "coverage_desc": "Maroc & International (70+ pays)"
+    }
     if not api_key:
-        status["error"] = "Clé JOOBLE_API_KEY non configurée"
+        status["error"] = "Clé JOOBLE_API_KEY absente (requise pour rechercher au Maroc)"
         return [], status
         
-    # Choisir le point de terminaison adapté
     country_lower = country.lower().strip()
+    # Sélection de l'endpoint adapté
     if country_lower in ["maroc", "morocco", "ma"]:
         endpoint = f"https://ma.jooble.org/api/{api_key}"
     elif country_lower in ["france", "fr"]:
@@ -232,13 +354,11 @@ def fetch_jooble(
     headers = {"Content-Type": "application/json"}
     matched = []
     
-    # Construire la requête
     target_loc = f"{city} {country}".strip()
     search_terms = queries if queries else ["stage"]
     
     try:
         for q in search_terms[:3]:
-            # S'assurer d'inclure le terme 'stage' ou 'intern'
             kw = q if any(k in q.lower() for k in ["stage", "intern"]) else f"stage {q}"
             payload = {
                 "keywords": kw,
@@ -267,7 +387,7 @@ def fetch_jooble(
                         "source": "Jooble"
                     })
             elif resp.status_code in [401, 403]:
-                status["error"] = f"Clé Jooble invalide ou quota atteint (HTTP {resp.status_code})"
+                status["error"] = f"Clé Jooble invalide ou expirée (HTTP {resp.status_code})"
                 return [], status
                 
             if len(matched) >= max_results:
@@ -291,27 +411,31 @@ def fetch_adzuna(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Interroge l'API Adzuna (clé gratuite sur developer.adzuna.com).
-    Couvre: France (fr), UK (gb), USA (us), Allemagne (de), etc. (ne couvre pas le Maroc).
+    Couverture RÉELLE : 20 pays dont France, UK, USA, Allemagne, Canada.
+    NE COUVRE PAS LE MAROC.
     """
-    status = {"name": "Adzuna", "ok": False, "count": 0, "error": None}
-    if not (app_id and app_key):
-        status["error"] = "Identifiants Adzuna non configurés"
-        return [], status
-        
-    # Mapping pays
-    country_map = {
-        "france": "fr", "fr": "fr",
-        "uk": "gb", "royaume-uni": "gb", "gb": "gb",
-        "usa": "us", "etats-unis": "us", "us": "us",
-        "germany": "de", "allemagne": "de", "de": "de",
-        "canada": "ca", "ca": "ca",
-        "belgique": "be", "be": "be",
-        "suisse": "ch", "ch": "ch",
-        "espagne": "es", "es": "es",
-        "italie": "it", "it": "it"
+    status = {
+        "name": "Adzuna",
+        "ok": False,
+        "count": 0,
+        "error": None,
+        "coverage_desc": "France, UK, USA, Allemagne... (Ne couvre pas le Maroc)"
     }
     
-    code = country_map.get(country.lower().strip(), "fr")
+    country_lower = country.lower().strip()
+    if country_lower in ["maroc", "morocco", "ma"]:
+        status["error"] = "Adzuna ne couvre pas le Maroc (non disponible dans leur catalogue)"
+        return [], status
+        
+    code = ADZUNA_COUNTRY_CODES.get(country_lower)
+    if not code:
+        status["error"] = f"Pays '{country}' non supporté par l'API Adzuna"
+        return [], status
+
+    if not (app_id and app_key):
+        status["error"] = "Identifiants ADZUNA_APP_ID / ADZUNA_APP_KEY non configurés"
+        return [], status
+        
     base_url = f"https://api.adzuna.com/v1/api/jobs/{code}/search/1"
     matched = []
     
@@ -370,8 +494,8 @@ def fetch_all_internships(
     max_total_offers: int = 30
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Combine toutes les sources disponibles, déduplique et filtre les offres.
-    Ne conserve que les offres valides avec lien direct.
+    Combine toutes les sources disponibles, déduplique et filtre strictement les offres.
+    Respecte scrupuleusement la localisation demandée.
     """
     if secrets is None:
         secrets = {}
@@ -379,20 +503,23 @@ def fetch_all_internships(
     all_offers = []
     sources_status = {}
     
-    # 1. Arbeitnow (toujours actif, sans clé)
-    an_offers, an_status = fetch_arbeitnow(queries, country, city, max_results=25)
+    target_country = country.strip()
+    target_city = city.strip()
+    
+    # 1. Arbeitnow (Europe / Remote)
+    an_offers, an_status = fetch_arbeitnow(queries, target_country, target_city, max_results=25)
     sources_status["Arbeitnow"] = an_status
     all_offers.extend(an_offers)
     
-    # 2. Remotive (toujours actif, sans clé)
-    rem_offers, rem_status = fetch_remotive(queries, country, city, max_results=15)
+    # 2. Remotive (100% Télétravail mondial)
+    rem_offers, rem_status = fetch_remotive(queries, target_country, target_city, max_results=15)
     sources_status["Remotive"] = rem_status
     all_offers.extend(rem_offers)
     
-    # 3. Jooble (actif si clé présente)
-    jooble_key = secrets.get("JOOBLE_API_KEY")
+    # 3. Jooble (Maroc & 70+ pays, actif si clé présente)
+    jooble_key = secrets.get("JOOBLE_API_KEY", "")
     if jooble_key:
-        j_offers, j_status = fetch_jooble(jooble_key, queries, country, city, max_results=20)
+        j_offers, j_status = fetch_jooble(jooble_key, queries, target_country, target_city, max_results=20)
         sources_status["Jooble"] = j_status
         all_offers.extend(j_offers)
     else:
@@ -400,14 +527,15 @@ def fetch_all_internships(
             "name": "Jooble",
             "ok": False,
             "count": 0,
-            "error": "Clé non configurée (optionnelle pour étendre la couverture pays)"
+            "error": "Clé JOOBLE_API_KEY non configurée (requise pour le Maroc)",
+            "coverage_desc": "Maroc & International (70+ pays)"
         }
         
-    # 4. Adzuna (actif si id et clé présents)
-    adzuna_id = secrets.get("ADZUNA_APP_ID")
-    adzuna_key = secrets.get("ADZUNA_APP_KEY")
+    # 4. Adzuna (France, UK, USA...)
+    adzuna_id = secrets.get("ADZUNA_APP_ID", "")
+    adzuna_key = secrets.get("ADZUNA_APP_KEY", "")
     if adzuna_id and adzuna_key:
-        ad_offers, ad_status = fetch_adzuna(adzuna_id, adzuna_key, queries, country, city, max_results=20)
+        ad_offers, ad_status = fetch_adzuna(adzuna_id, adzuna_key, queries, target_country, target_city, max_results=20)
         sources_status["Adzuna"] = ad_status
         all_offers.extend(ad_offers)
     else:
@@ -415,7 +543,8 @@ def fetch_all_internships(
             "name": "Adzuna",
             "ok": False,
             "count": 0,
-            "error": "Clés non configurées (optionnelle pour France/UK/USA)"
+            "error": "Clés non configurées" if target_country.lower() not in ["maroc", "morocco", "ma"] else "Adzuna ne couvre pas le Maroc",
+            "coverage_desc": "France, UK, USA... (Ne couvre pas le Maroc)"
         }
 
     # Déduplication stricte par URL et par (titre normalisé, entreprise normalisée)
@@ -428,7 +557,6 @@ def fetch_all_internships(
         if not url:
             continue
             
-        # Normaliser pour déduplication
         norm_title = re.sub(r"[^\w\s]", "", offer.get("title", "").lower()).strip()
         norm_company = re.sub(r"[^\w\s]", "", offer.get("company", "").lower()).strip()
         offer_key = (norm_title, norm_company)
